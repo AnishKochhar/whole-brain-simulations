@@ -1,8 +1,6 @@
 ## Build PyTorch-Geometric graphs from BOLD chunks + SC matrices
 
-import numpy as np
 import torch
-from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
 from torch_geometric.utils import dense_to_sparse
 from torch_geometric.data import Data
@@ -11,52 +9,64 @@ class GraphBuilder:
     """
     Converts (bold, sc) pairs into PyG Data objects:
         adjacenct = structural connectivity (N, N)
-        x = Ledoit-Wolf FC column featrures (N, N) 
-            (+ optional PCA of raw BOLD) (N, p_dim)
+        x = Ledoit-Wolf FC column featrures (N, N) (+ optional PCA of raw BOLD) (N, p_dim)
         y = label (1 = real, 0 = synthetic)
     """
-    def __init__(self, node_dim: int = 100, pca_dim: int = 8, use_pca: bool = True, device: str = "cpu"):
+    def __init__(self, node_dim: int = 100, pca_dim: int = 8, use_pca: bool = True, device: str = "cuda"):
         self.node_dim = node_dim
         self.pca_dim = pca_dim
         self.use_pca = use_pca
         self.device = device
         self._pca = PCA(n_components=pca_dim) if use_pca else None
 
-    @staticmethod
-    def _ledoit_wolf_corr(bold_np: np.ndarray):
-        """ 
-        Ledoit-Wold shrunk covariance, used as correlation column features 
+    def _ledoit_wolf_shrinkage_torch(self, X: torch.Tensor, shrinkage_value: float = 0.1):
+        """
+        Compute Ledoit-Wolf shrunk covariance matrix in PyTorch (with manual shrinkage)
+        
         Parameters:
-            bold_np: shape (N, T)
+            X: torch.Tensor of shape (T, N) or (B, T, N)
+            shrinkage_value: float in [0, 1], amount of shrinkage
+
+        Returns:
+            shrunk_cov: torch.Tensor of shape (N, N) or (B, N, N)
         """
-        lw = LedoitWolf(store_precision=False).fit(bold_np.T)
-        covariance = lw.covariance_
-        std = np.sqrt(np.diag(covariance) + 1e-12)
-        correlation = covariance / np.outer(std, std) # shape (N, N)
-        return correlation 
-    
-    def _node_features(self, bold_np: np.ndarray):
+        if X.dim() == 2:
+            X = X.unsqueeze(0)  # (1, T, N)
+        B, T, N = X.shape
+
+        X_mean = X.mean(dim=1, keepdim=True)
+        X_centered = X - X_mean  # (B, T, N)
+        empirical_cov = torch.matmul(X_centered.transpose(1, 2), X_centered) / (T - 1)  # (B, N, N)
+
+        # Target: identity scaled by average variance
+        avg_var = torch.mean(torch.diagonal(empirical_cov, dim1=1, dim2=2), dim=1)  # (B,)
+        target = torch.stack([torch.eye(N, device=X.device) * avg_var[i] for i in range(B)], dim=0)  # (B, N, N)
+
+        shrunk_cov = (1 - shrinkage_value) * empirical_cov + shrinkage_value * target
+        return shrunk_cov.squeeze(0) if shrunk_cov.shape[0] == 1 else shrunk_cov
+
+    def build_graph(self, bold_chunk: torch.Tensor, sc_matrix: torch.Tensor, label: float = 1.0) -> Data:
         """
-        Feature 1: column of shrunk FC (N, N)
-        Feature 2: p PCA components (N, p)
+        Builds Data instance out of input BOLD time series and SC matrix
+        Uses Ledoit Wolf shrinkage as functional connectivity matrix
+
+        Parameters:
+            bold_chunk: torch Tensor shape (N, T)
+            sc: torch Tensor shape (N, N)
+        
+            Returns:
+
         """
-        fc = self._ledoit_wolf_corr(bold_np)
-        feats = [fc.T] # x_i columns
+        cov = self._ledoit_wolf_shrinkage_torch(bold_chunk.T)
+        std = torch.sqrt(torch.diag(cov) + 1e-8)
+        fc = cov / (std.unsqueeze(0) * std.unsqueeze(1) + 1e-8)
+        
+        feats = [fc.t()]
+
         if self.use_pca:
-            pca_feats = self._pca.fit_transform(bold_np)
-            feats.append(pca_feats)
-        feat_mat = np.concatenate(feats, axis=1)      # (N, d)
-        return torch.tensor(feat_mat, dtype=torch.float32, device=self.device)
-    
-    def build_graph(self, bold: np.ndarray, sc: np.ndarray, label: int):
-        """
-        Parameters:
-            bold: ndarray, BOLD chunk with shape (N, T)
-            sc: ndarray, SC matrix ([0, 1] normalised) shape (N, N)
-            label: int, 1 = real, 0 = simualted
-        """
-        A = torch.tensor(sc, dtype=torch.float32)
-        X = self._node_features(bold)
-        edge_index, edge_weight = dense_to_sparse(A)
-        data = Data(x = X, edge_index=edge_index, edge_weight=edge_weight, y=torch.tensor([label], dtype=torch.float32))
-        return data
+            feats.append(self._pca.fit_transform(bold_chunk.T.detach().numpy()))
+        
+        x = torch.cat(feats, dim=1).to(self.device)
+        edge_index, edge_weight = dense_to_sparse(sc_matrix)
+        return Data(x = x.to(self.device), edge_index=edge_index.to(self.device), edge_weight=edge_weight.to(self.device), 
+                    y=torch.tensor([label], dtype=torch.float32, device=self.device)).to(self.device)

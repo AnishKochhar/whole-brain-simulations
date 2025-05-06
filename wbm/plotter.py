@@ -43,12 +43,13 @@ class Plotter:
         plt.show()
 
     @staticmethod
-    def plot_functional_connectivity_heatmaps(simulated_fc: np.ndarray, empirical_fc: np.ndarray):
+    def plot_functional_connectivity_heatmaps(simulated_fc: np.ndarray, empirical_fc: np.ndarray, subject: int = None):
         """
             Plots both simulated and empirical Functional Connectivity (heatmap) on horizontal axis
             sim_fc, emp_fc: np.ndarray
         """
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        if subject: fig.suptitle(f"Subject {subject}")
         sns.heatmap(simulated_fc, vmin=-1, vmax=1, cmap='coolwarm', ax=axes[0])
         axes[0].set_title("Simulated FC")
         sns.heatmap(empirical_fc, vmin=-1, vmax=1, cmap='coolwarm', ax=axes[1])
