@@ -5,6 +5,7 @@ import os, random
 import numpy as np
 import torch
 import scipy.io
+from wbm.utils import DEVICE
 
 class BOLDDataLoader:
     def __init__(self, fmri_filename: str, dti_filename: str, distance_matrices_path: str, chunk_length: int = 50):
@@ -74,12 +75,12 @@ class BOLDDataLoader:
         for subject, _bold in enumerate(self.all_bold):
             sc = self.all_SC[subject]
             gt_graphs.extend(
-                [builder.build_graph(torch.tensor(chunk["bold"], dtype=torch.float32, device=builder.device), torch.tensor(sc, dtype=torch.float32, device=builder.device), label=1.0) for chunk in self.bold_chunks if chunk["subject"] == subject]
+                [builder.build_graph(torch.tensor(chunk["bold"], dtype=torch.float32, device=DEVICE), torch.tensor(sc, dtype=torch.float32, device=builder.device), label=1.0) for chunk in self.bold_chunks if chunk["subject"] == subject]
             )
 
         return gt_graphs
 
-    def sample_minibatch(self, batch_size: int, device: str = "cuda"):
+    def sample_minibatch(self, batch_size: int):
         sampled = random.sample(self.bold_chunks, batch_size)
         batched_bold = []
         batched_SC = []
@@ -109,20 +110,21 @@ class BOLDDataLoader:
 
         # Stack BOLD
         batched_bold = np.stack(batched_bold, axis=-1) # (node_size, chunk_length, batch_size)
-        batched_bold = torch.tensor(batched_bold, dtype=torch.float32, device=device)
+        batched_bold = torch.tensor(batched_bold, dtype=torch.float32, device=DEVICE)
 
         # Stack batched laplacians
-        batched_laplacians = np.stack(batched_laplacians, axis=0)
-        batched_laplacians = torch.tensor(batched_laplacians, dtype=torch.float32, device=device)
+        batched_laplacians = np.stack(batched_laplacians, axis=0) # (batch_size, node_size, node_size)
+        batched_laplacians = torch.tensor(batched_laplacians, dtype=torch.float32, device=DEVICE)
 
         # Stack batched SC
         batched_SC = np.stack(batched_SC, axis=0)
-        batched_SC = torch.tensor(batched_SC, dtype=torch.float32, device=device)
+        batched_SC = torch.tensor(batched_SC, dtype=torch.float32, device=DEVICE)
 
         # Stack distance matrices
         batched_dist = np.stack(batched_dist, axis=0)
-        batched_dist = torch.tensor(batched_dist, dtype=torch.float32, device=device)
+        batched_dist = torch.tensor(batched_dist, dtype=torch.float32, device=DEVICE)
 
+        batch_subjects = torch.tensor(batch_subjects, dtype=torch.int32, device=DEVICE)
 
         return batched_bold, batched_SC, batched_laplacians, batched_dist, batch_subjects
 

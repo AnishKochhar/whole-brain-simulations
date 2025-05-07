@@ -4,6 +4,7 @@ import torch.nn as nn
 from pathlib import Path
 from discriminator.contrastive_discriminator import GraphEncoder, Discriminator
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def save_frozen_models(encoder: nn.Module, discriminator: nn.Module, path_root = "checkpoints"):
     path_root = Path(path_root)
@@ -16,6 +17,8 @@ def load_encoder(path: str, in_dim: int, hidden: int, latent: int, freeze: bool 
                  device: str = "cuda") -> GraphEncoder:
     encoder = GraphEncoder(in_dim, hidden, latent).to(device)
     encoder.load_state_dict(torch.load(path, map_location=device))
+    total_parameters = sum(p.numel() for p in encoder.parameters())
+    print(f"[UTILS] GraphEncoder loaded with {total_parameters} parameters")
     encoder.eval()
 
     for parameter in encoder.parameters():
@@ -26,6 +29,8 @@ def load_discriminator(path: str, encoder: GraphEncoder, latent: int, use_critic
                        freeze: bool = True, device: str = "cuda") -> Discriminator:
     discriminator = Discriminator(encoder, latent, use_critic=use_critic).to(device)
     discriminator.load_state_dict(torch.load(path, map_location=device))
+    total_parameters = sum(p.numel() for p in discriminator.parameters())
+    print(f"[UTILS] Discriminator loaded with {total_parameters} parameters")
     discriminator.eval()
 
     for parameter in discriminator.parameters():

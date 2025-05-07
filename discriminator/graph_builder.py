@@ -4,6 +4,7 @@ import torch
 from sklearn.decomposition import PCA
 from torch_geometric.utils import dense_to_sparse
 from torch_geometric.data import Data
+from wbm.utils import DEVICE
 
 class GraphBuilder:
     """
@@ -12,7 +13,7 @@ class GraphBuilder:
         x = Ledoit-Wolf FC column featrures (N, N) (+ optional PCA of raw BOLD) (N, p_dim)
         y = label (1 = real, 0 = synthetic)
     """
-    def __init__(self, node_dim: int = 100, pca_dim: int = 8, use_pca: bool = True, device: str = "cuda"):
+    def __init__(self, node_dim: int = 100, pca_dim: int = 8, use_pca: bool = True, device: str = DEVICE):
         self.node_dim = node_dim
         self.pca_dim = pca_dim
         self.use_pca = use_pca
@@ -30,6 +31,7 @@ class GraphBuilder:
         Returns:
             shrunk_cov: torch.Tensor of shape (N, N) or (B, N, N)
         """
+        X = X.to(DEVICE)
         if X.dim() == 2:
             X = X.unsqueeze(0)  # (1, T, N)
         B, T, N = X.shape
@@ -60,6 +62,7 @@ class GraphBuilder:
         cov = self._ledoit_wolf_shrinkage_torch(bold_chunk.T)
         std = torch.sqrt(torch.diag(cov) + 1e-8)
         fc = cov / (std.unsqueeze(0) * std.unsqueeze(1) + 1e-8)
+        fc = torch.nan_to_num(fc, nan=0.0, posinf=1.0, neginf=-1.0)
         
         feats = [fc.t()]
 
