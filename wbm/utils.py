@@ -5,6 +5,7 @@ from pathlib import Path
 from discriminator.contrastive_discriminator import GraphEncoder, Discriminator
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using DEVICE = {DEVICE}")
 
 def save_frozen_models(encoder: nn.Module, discriminator: nn.Module, path_root = "checkpoints"):
     path_root = Path(path_root)
