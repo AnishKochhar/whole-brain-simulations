@@ -8,10 +8,15 @@ import os
 
 class Plotter:
     save_figures = True
-    save_figpath = "wbm_plots/"
+    save_figpath = "runs/"
+    save_tag = ""
+    _seq_counter = 1
+    
+    def set_tag(t: str):
+        Plotter.save_tag = t
 
     @staticmethod
-    def _autofill(x):       # Accepts torch / numpy / list
+    def _autofill(x):       # tensor -> numpy
         if isinstance(x, torch.Tensor):
             return x.cpu().float().numpy()
         return np.asarray(x)
@@ -19,16 +24,21 @@ class Plotter:
     @staticmethod
     def _get_save_path(basename, ext=".png"):
         """
-        Returns a non-overwriting file path for saving figures.
+        Returns a non-overwriting file path for saving figures
         Uses Plotter.save_figpath as directory if set, else current directory.
         """
-        directory = Plotter.save_figpath or "."
+        directory = os.path.join(Plotter.save_figpath, Plotter.save_tag)
         os.makedirs(directory, exist_ok=True)
+
+        seq = Plotter._seq_counter
+        Plotter._seq_counter += 1
+
         idx = 0
         while True:
-            fname = f"{basename}{f'_{idx}' if idx > 0 else ''}{ext}"
+            fname = f"{seq}_{basename}{f'_{idx}' if idx else ''}{ext}"
             fpath = os.path.join(directory, fname)
             if not os.path.exists(fpath):
+                print(f"[Plotter] Saving to {fpath}")
                 return fpath
             idx += 1
 
@@ -44,7 +54,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_rmse_curve(epoch_indices, rmse_values):
@@ -58,7 +68,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_roi_correlation_curve(epoch_indices, roi_corr_values):
@@ -72,7 +82,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_fc_correlation_curve(epoch_indices, fc_corr_values):
@@ -82,32 +92,40 @@ class Plotter:
         plt.xlabel("Epoch")
         plt.ylabel("Average FC Pearson r")
         if Plotter.save_figures:
-            fpath = Plotter._get_save_path("fc_correlation_curve")
+            fpath = Plotter._get_save_path("fc_corr_curve")
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
-    def plot_functional_connectivity_heatmaps(simulated_fc: np.ndarray, empirical_fc: np.ndarray, subject: int = None):
+    def plot_functional_connectivity_heatmaps(simulated_fc: np.ndarray, empirical_fc: np.ndarray, subject: int = None, fc_corr: float = None):
         """
             Plots both simulated and empirical Functional Connectivity (heatmap) on horizontal axis
             sim_fc, emp_fc: np.ndarray
         """
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        if subject: fig.suptitle(f"Subject {subject}")
+
+        title_parts = []
+        if subject is not None:
+            title_parts.append(f"Subject {subject}")
+        if fc_corr is not None:
+            title_parts.append(f"r = {fc_corr:.3f}")
+        if title_parts:
+            fig.suptitle(" | ".join(title_parts))
+
         sns.heatmap(simulated_fc, vmin=-1, vmax=1, cmap='coolwarm', ax=axes[0])
         axes[0].set_title("Simulated FC")
         sns.heatmap(empirical_fc, vmin=-1, vmax=1, cmap='coolwarm', ax=axes[1])
         axes[1].set_title("Empirical FC")
-        plt.tight_layout()
+        plt.tight_layout(rect=(0,0,1,0.95))
+
         if Plotter.save_figures:
-            base = f"fc_heatmaps_subject_{subject}" if subject is not None else "fc_heatmaps"
-            fpath = Plotter._get_save_path(base)
-            plt.savefig(fpath)
+            base = f"fc_subj_{subject}" if subject is not None else "fc"
+            plt.savefig(Plotter._get_save_path(base))
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_time_series(time_series: torch.Tensor, title: str, max_nodes: int = 6):
@@ -131,7 +149,7 @@ class Plotter:
                 plt.savefig(fpath)
             else:
                 plt.show()
-            plt.close('all')
+            plt.close()
 
     @staticmethod
     def plot_hidden_states(hidden_state_logs: np.ndarray, state_names = ['E', 'I', 'x', 'f', 'v', 'q']):
@@ -155,7 +173,7 @@ class Plotter:
                 plt.savefig(fpath)
             else:
                 plt.show()
-            plt.close('all')
+            plt.close()
 
 
     @staticmethod
@@ -178,7 +196,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
         
 
     @staticmethod
@@ -202,7 +220,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_matrix(matrix: np.ndarray, title = "Laplacian Heatmap", cmap = 'viridis'):
@@ -218,7 +236,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def plot_distance_matrix(subject_index: int, distance_matrix: np.ndarray):
@@ -233,7 +251,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     def plot_vector(vector, title="Vector Plot", xlabel="Source Node", ylabel="Value"):
         v = Plotter._autofill(vector).flatten()
@@ -249,7 +267,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     def plot_hist(array, bins=50, title=""):
         plt.figure()
@@ -262,7 +280,7 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()
 
     @staticmethod
     def hist_triplet(arr1, arr2, arr3, step, titles=("I_E", "aE*I_E-bE", "r_E"), bins=40):
@@ -277,4 +295,4 @@ class Plotter:
             plt.savefig(fpath)
         else:
             plt.show()
-        plt.close('all')
+        plt.close()

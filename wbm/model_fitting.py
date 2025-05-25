@@ -1,9 +1,10 @@
 # Anish Kochhar, Imperial College London, March 2025
-import time, gc
+import os, time, gc, psutil
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
+from scipy.signal import butter, filtfilt
 # from tqdm import tqdm
 from wbm.data_loader import BOLDDataLoader
 from wbm.utils import DEVICE
@@ -37,8 +38,14 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
         self.batch_iters = batch_iters
 
         self.logs = { "losses": [], "fc_correlation": [], "rmse": [], "roi_correlation": [], "hidden_states": [], "adv_loss": [] }
-        self.parameters_history = { name: [] for name in ["g", "g_EE", "g_EI", "g_IE"] }
+        self.parameters_history = { name: [] for name in ["g", "g_EE", "g_IE"] }
         self.device = device
+        
+        fs = 1.0 / (self.model.params.tr / 1000.0) # Hz (1.33 if tr = 0.75s)
+        low, high = 0.01, 0.25
+        b, a = butter(3, [low/(fs/2), high/(fs/2)], btype='band')
+        self._bp_b = torch.tensor(b, dtype=torch.float32, device='cpu')
+        self._bp_a = torch.tensor(a, dtype=torch.float32, device='cpu')
 
 
     def smooth(self, bold: torch.Tensor):
@@ -57,6 +64,14 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
         smoothed = smoothed.reshape(N, B, T).permute(0, 2, 1)
         return smoothed
 
+    def _bandpass(self, bold: torch.Tensor) -> torch.Tensor:
+        bold_np = bold.detach().cpu().numpy()                     # (N,T,B)
+        N, T, B = bold_np.shape
+        for b in range(B):
+            bold_np[:, :, b] = filtfilt(self._bp_b, self._bp_a, bold_np[:, :, b], axis=1, padtype='odd')
+        return torch.from_numpy(bold_np).to(bold.device)
+
+
     def compute_fc(self, matrix: torch.Tensor):
         """ Builds the FC matrix  """
         zero_centered = matrix - matrix.mean(dim=1, keepdim=True)
@@ -72,7 +87,7 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
             delays_max: Maximum delay stored for residual connections
             batch_size: Minibatch size
         """
-        torch.autograd.set_detect_anomaly(True)
+        torch.autograd.set_detect_anomaly(False)
 
         num_batches = self.loader.batched_dataset_length(batch_size)  # Minibatches per epoch
         num_batches = min(num_batches, self.batch_iters) if self.batch_iters else num_batches
@@ -96,7 +111,7 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
             
                 empirical_bold, normalised_sc, sampled = self.loader.sample_minibatch(batch_size)
 
-                num_TRs = empirical_bold.shape[1]   # chunk_length = 50
+                num_TRs = empirical_bold.shape[1]   # chunk_length 
 
                 simulated_bold_chunks = []
                 # noise_in shape: (node_size, hidden_size, batch_size, input_size) with input_size = 6
@@ -111,8 +126,7 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
                     # noise_in = torch.zeros_like(noise_in)
                     noise_in.normal_()
 
-                    noise_out = torch.zeros_like(noise_out)
-                    # noise_out.normal_() 
+                    noise_out.normal_()
 
                     # external_current = torch.zeros(self.model.node_size, self.model.hidden_size, batch_size, device=self.device)
 
@@ -122,16 +136,9 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
 
                     if self.log_state:
                         state_means = state.mean(dim=(0, 2)).detach().cpu().numpy()
-                        # if tr_index % 10 == 0:
                         E_mean, I_mean, s_mean, f_mean, v_mean, q_mean = state_means
                         print(f"TR {tr_index:02d} | E={E_mean:.4f}  I={I_mean:.4f}  s={s_mean:.4f}  f={f_mean:.4f}  v={v_mean:.4f}  q={q_mean:.4f}" )
                         epoch_state_log.append(state_means)
-                        
-                    # if tr_index % 10 == 0:
-                    #     print(f"SNR {((bold_chunk - noise_out).std()/noise_out.std()).item():.1f}",
-                    #     f"|corr(E)| {torch.corrcoef(state[:,0,:]).abs().mean():.2f}",
-                    #     f"|corr(BOLD)| {torch.corrcoef(bold_chunk).abs().mean():.2f}")
-
 
                 # Stack TR chunks to form a time series: (node_size, num_TRs, batch_size)
                 simulated_bold_epoch = torch.stack(simulated_bold_chunks, dim=1)
@@ -143,21 +150,31 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
                 print("Simulated BOLD (final TR) - mean: {:.4f}, std: {:.4f}".format(sim_final.mean(), sim_final.std()))
                 print("Empirical BOLD (final TR) - mean: {:.4f}, std: {:.4f}".format(emp_final.mean(), emp_final.std()))
 
+                print(f"R_E_mean {float(np.mean(self.model.hidden_R_E)):.4f} R_E_std {float(np.std (self.model.hidden_R_E)):.4f}")
+                print(f"R_I_mean {float(np.mean(self.model.hidden_R_I)):.4f} R_I_std {float(np.std (self.model.hidden_R_I)):.4f}")
+
                 # Compute cost
                 metrics = self.cost_function.compute(smoothed_simulated_bold_epoch, empirical_bold)
                 loss = metrics["loss"]
 
-                print("MEMORY SUMMARY", torch.cuda.memory_summary())
                 torch.cuda.synchronize()
                 start = time.perf_counter()
                 loss.backward()
                 torch.cuda.synchronize()
                 print(f"Loss = {loss.item():.4f}")
                 print(f"Backward {(time.perf_counter()-start):.2f} s")
+
+                proc = psutil.Process(os.getpid())
+                print(f"[mem]  CPU RSS = {proc.memory_info().rss / 2**20:,.1f} MB   "
+                    f"GPU = {torch.cuda.memory_allocated() / 2**20:,.1f} MB   "
+                    f"cuda max = {torch.cuda.max_memory_allocated() / 2**20:,.1f}")
+
                 
                 # Print gradient norms for each parameter
                 grad_info = []
                 for name, param in self.model.named_parameters():
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print('Bad grad in', name)
                     if param.grad is not None:
                         grad_norm = param.grad.norm().item()
                         grad_info.append(f"{name}: {grad_norm:.2e}")
@@ -165,16 +182,13 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
                         grad_info.append(f"{name}: None")
                 print("Grad norms | " + ", ".join(grad_info))
 
-                for n, p in self.model.named_parameters():
-                    if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
-                        print('Bad grad in', n)
 
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 
                 batch_losses.append(loss.item())
-                batch_fc_corrs.append(metrics["average_fc_correlation"].item())
+                batch_fc_corrs.append(metrics["average_fc_correlation"])
                 batch_roi_corrs.append(metrics["average_rois_correlation"])
                 batch_rmses.append(metrics["rmse"])
                 # batch_adv_losses.append(total_adversarial_loss)
@@ -194,7 +208,7 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
                 empirical_fc = self.compute_fc(empirical_bold[:, :, 0])
                 sampled_id = sampled[0]
                 
-                Plotter.plot_functional_connectivity_heatmaps(simulated_fc, empirical_fc, sampled_id)
+                Plotter.plot_functional_connectivity_heatmaps(simulated_fc, empirical_fc, sampled_id, metrics["average_fc_correlation"])
 
                 Plotter.plot_node_comparison(
                     empirical_bold[:, :, 0].unsqueeze(-1),
@@ -202,7 +216,7 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
                     node_indices=list(np.random.choice(range(self.model.node_size), size=10, replace=False))
                 )
 
-                del simulated_bold_chunks[:], simulated_bold_epoch, smoothed_simulated_bold_epoch
+                del simulated_bold_chunks[:], simulated_bold_epoch
                 gc.collect()
 
             for parameter_name in self.parameters_history:
@@ -269,3 +283,27 @@ EXPIRED     discriminator: DiscriminatorHook instance, containing all functional
 
         for name, param in self.model.named_parameters():
             print(name, param.item())
+
+        core_metrics = {
+            "tag"     : os.getenv('WBMRUN', 'NA'),
+            "g"       : self.model.g.item(),
+            "g_EE"    : self.model.g_EE.item(),
+            "g_IE"    : self.model.g_IE.item(),
+            "JN"      : self.model.JN.item(),
+            "sigma"   : self.model.sigma_E.item(),
+            "V0"      : self.model.V0_h.item(),
+            "delay"   : int(self.model.params.use_delay_based),
+            "inhgain" : int(self.model.params.inhibitory_gain_scalar),
+            "epoch"   : self.num_epochs,
+            "loss"    : self.logs["losses"][-1],
+            "fc_r"    : self.logs["fc_correlation"][-1],
+            "roi_r"   : self.logs["roi_correlation"][-1],
+            "rmse"    : self.logs["rmse"][-1],
+            "R_E_mean": float(np.mean(self.model.hidden_R_E)),
+            "R_E_std" : float(np.std (self.model.hidden_R_E)),
+            "R_I_mean": float(np.mean(self.model.hidden_R_I)),
+            "R_I_std" : float(np.std (self.model.hidden_R_I)),
+            "f_min"   : float(np.min (self.model.hidden_f)),
+            "f_max"   : float(np.max (self.model.hidden_f)),
+        }
+        return core_metrics

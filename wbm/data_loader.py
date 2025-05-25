@@ -22,6 +22,7 @@ class BOLDDataLoader:
         self.all_distances = [] # list of dist_matrix, each shape (node_size, node_size)
         self.bold_chunks = []   # list of dicts: {'subject': int, 'bold': array (node_size, chunk_length)}
         self.distance_matrix = None
+        self.csv_sc = self._load_csv_sc()
 
         self._load_data()
         self._split_into_chunks()
@@ -94,7 +95,7 @@ class BOLDDataLoader:
             subject = batch_element["subject"]
             batch_subjects.append(subject)
 
-            sc_norm = self.all_SC[subject]
+            sc_norm = self.csv_sc #self.all_SC[subject]  
             # degree_matrix = np.diag(np.sum(sc_norm, axis=1))
             # laplacian = degree_matrix - sc_norm
             # batched_SC.append(laplacian)
@@ -115,3 +116,19 @@ class BOLDDataLoader:
 
         return batched_bold, batched_SC, batch_subjects
 
+
+
+
+    def _load_csv_sc(self, csv_path: str = "HCP Data/fiber_consensus.csv"):
+        sc = np.loadtxt(csv_path, delimiter=",")
+        sc_norm = sc / sc.max()                         # global-max scaling
+        row_sum_csv = sc_norm.sum(axis=1)
+
+        print(f"[DataLoader] Consensus SC (CSV):")
+        print(f"  nodes            : {sc_norm.shape[0]}")
+        print(f"  row-sum  min     : {row_sum_csv.min():.4f}")
+        print(f"  row-sum  mean    : {row_sum_csv.mean():.4f}")
+        print(f"  row-sum  max     : {row_sum_csv.max():.4f}")
+        print(f"  row-sum  std     : {row_sum_csv.std():.4f}")
+
+        return sc_norm

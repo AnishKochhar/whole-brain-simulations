@@ -36,7 +36,6 @@ finetune_steps           = 5                        # Number of steps taken in e
 finetune_batch           = 32
 
 
-# params = ModelParams()
 params = FastDMFParams(dt=dt, dtt=dtt, tr=tr, use_delay_based=delayed_based_feedback, inhibitory_gain_scalar=inhibitory_gain_scalar, verbose=True)
 
 distance_matrix = data_loader.get_distance_matrix()
@@ -46,7 +45,8 @@ model = WholeBrainFastDMF(params, distance_matrix, node_size, input_size, batch_
 costs = Costs()
 
 trainer = ModelFitting(model, data_loader, num_epochs=trainer_epochs, lr=trainer_lr, cost_function=costs, \
-                       smoothing_window=trainer_smoothing_window, finetune_steps=finetune_steps, finetune_batch=finetune_batch, log_state=False)
+                        smoothing_window=trainer_smoothing_window, finetune_steps=finetune_steps, \
+                        finetune_batch=finetune_batch, batch_iters=trainer_batch_iters, log_state=False)
 
 trainer.train(delays_max, batch_size)
 

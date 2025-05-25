@@ -12,14 +12,9 @@ def debug_snapshot(step_ms: float, rho: torch.Tensor,
     Pretty print a full numerical health report for the DMF/BW step.
 
     Parameters
-    ----------
-    step_ms : float
-        simulation time in milliseconds (for the header)
-    rho : torch.Tensor
-        the rho scalar (needed to evaluate the nasty (1-rho)^(1/f) term)
-    tensors : keyword tensors
-        any number of named tensors, e.g.   E=E, I=I, s=s, f=f, v=v, q=q,
-        I_E=I_E, I_I=I_I, R_E=R_E, R_I=R_I, BOLD=BOLD
+    step_ms : float, simulation time in milliseconds (for the header)
+    rho : torch.Tensor, rho scalar (needed to evaluate (1-rho)^(1/f))
+    tensors : keyword tensors, E=E, I=I, s=s, f=f, v=v, q=q, I_E=I_E, I_I=I_I, R_E=R_E, R_I=R_I, BOLD=BOLD
     """
     bar = "─" * 109
 
@@ -38,9 +33,7 @@ def debug_snapshot(step_ms: float, rho: torch.Tensor,
         if name in ("f", "v", "q") and n_neg:
             flag += f"  ({n_neg} neg)"
         if flag:
-            print(f"\n{bar}\nNUMERICS CHECK @ {step_ms:7.1f} ms")
-            print(f"{name:6} :  min={mn:9.3e}  mean={av:9.3e}  "
-              f"max={mx:9.3e}  NaN={n_nan:4}  Inf={n_inf:4}{flag}")
+            print(f"{name:6} :  min={mn:9.3e}  mean={av:9.3e}  max={mx:9.3e}  NaN={n_nan:4}  Inf={n_inf:4}{flag}")
 
     # explicit test for the dangerous term in dq
     if "f" in tensors:
@@ -57,13 +50,6 @@ def debug_snapshot(step_ms: float, rho: torch.Tensor,
                 elif term.max() > 1e4:
                     print(f"\n[!]  (1-rho)^(1/f) very large (max={term.max().item():.3e})")
 
-    
-    if step_ms % 1000 == 0:
-        rss = psutil.Process(os.getpid()).memory_info().rss / 2**20
-        gpu = torch.cuda.memory_allocated() / 2**20
-        print(f"RSS = {rss:,.0f} MB   GPU alloc = {gpu:,.0f} MB\n")
-
-
 class FastDMFParams:
     def __init__(
         self,
@@ -79,8 +65,9 @@ class FastDMFParams:
         tau_I: float = 10.0,
         gamma_E: float = 0.641 / 1000.0,
         gamma_I: float = 1.0   / 1000.0,
-        sigma_E: float = 0.005,
-        sigma_I: float = 0.005,
+        sigma_E: float = 0.01,
+        sigma_I: float = 0.01,
+        sigma_BOLD: float = 0.005,
 
         # sigmoid transform
         aE: float = 310.0, bE: float = 125.0, dE: float = 0.16,
@@ -89,20 +76,20 @@ class FastDMFParams:
         # coupling
         g   : float = 2.0,    # global
         JN  : float = 0.15,   # J_nmda: excitatory synpatic coupling (nA)
-        g_EE: float = 1.4,    # w+: local excitatory recurrence
-        g_EI: float = 1.0,    # E→I
-        g_IE: float = 0.75,   # I→E
+        g_EE: float = 1.4,    # w: local excitatory recurrence
+        g_IE: float = 0.75,   # I->E
+        fic_coeff: float = 0.75, # FIC coefficient
 
         # hemodynamic (Balloon–Windkessel)
         tau_s: float = 0.65,   # s
         tau_f: float = 0.41,   # s
         tau_0: float = 0.98,   # s
         alpha: float = 0.32,
-        rho:   float = 0.34,    # 0.4
-        k1:    float = 2.38,    # 2.77
-        k2:    float = 2.0,     # 0.4
-        k3:    float = 0.48,    # 1
-        V0:    float = 0.2,
+        rho:   float = 0.4,     # 0.34
+        k1:    float = 2.77,    # 2.38
+        k2:    float = 0.4,     # 2.0
+        k3:    float = 1.0,     # 0.48
+        V0:    float = 0.4,
         E0:    float = 0.34,
         
         # variants + logging
@@ -127,6 +114,7 @@ class FastDMFParams:
         self.tau_E, self.tau_I = tau_E, tau_I
         self.gamma_E, self.gamma_I = gamma_E, gamma_I
         self.sigma_E, self.sigma_I = sigma_E, sigma_I
+        self.sigma_BOLD = sigma_BOLD
 
         # sigmoid
         self.aE, self.bE, self.dE = aE, bE, dE
@@ -134,7 +122,7 @@ class FastDMFParams:
 
         # coupling
         self.JN = JN
-        self.g, self.g_EE, self.g_EI, self.g_IE = g, g_EE, g_EI, g_IE
+        self.g, self.g_EE, self.g_IE, self.fic_coeff = g, g_EE, g_IE, fic_coeff
 
         # haemodynamics
         self.tau_s = tau_s # * 1000.0
@@ -171,27 +159,28 @@ class WholeBrainFastDMF(nn.Module):
         delay_steps = (delay_ms / params.dt).floor().clamp(0, delays_max-1).long()
         self.register_buffer('delay_steps', delay_steps)  # (1, N, N)
 
-        # Plotter.plot_matrix(delay_steps.squeeze(0), title=f"Delay Steps dt = {params.dt}", cmap="inferno")
+        # Plotter.plot_matrix(delay_steps.squeeze(0), title=f"Delay Steps dt = {params.dt}ms", cmap="viridis")
 
         def T(x): return torch.tensor(x, device=self.dist.device, dtype=torch.float32)
         
-        self.dt      = T(params.dt)
-        self.dtt     = T(params.dtt)
-        self.dtt_s   = T(params.dtt / 1000.0)
-        self.g       = nn.Parameter(T(params.g))
-        self.JN      = T(params.JN)
-        self.g_EE    = T(params.g_EE)
-        self.g_EI    = T(params.g_EI)
-        self.g_IE    = T(params.g_IE)
-        self.W_E     = T(params.W_E)
-        self.W_I     = T(params.W_I)
-        self.I_0     = T(params.I_0)
-        self.tau_E   = T(params.tau_E)
-        self.tau_I   = T(params.tau_I)
-        self.gamma_E = T(params.gamma_E)
-        self.gamma_I = T(params.gamma_I)
-        self.sigma_E = T(params.sigma_E)
-        self.sigma_I = T(params.sigma_I)
+        self.dt        = T(params.dt)
+        self.dtt       = T(params.dtt)
+        self.dtt_s     = T(params.dtt / 1000.0)
+        self.g         = nn.Parameter(T(params.g))
+        self.JN        = T(params.JN)
+        self.g_EE      = T(params.g_EE)
+        self.g_IE      = T(params.g_IE)
+        self.fic_coeff = T(params.fic_coeff)
+        self.W_E       = T(params.W_E)
+        self.W_I       = T(params.W_I)
+        self.I_0       = T(params.I_0)
+        self.tau_E     = T(params.tau_E)
+        self.tau_I     = T(params.tau_I)
+        self.gamma_E   = T(params.gamma_E)
+        self.gamma_I   = T(params.gamma_I)
+        self.sigma_E   = T(params.sigma_E)
+        self.sigma_I   = T(params.sigma_I)
+        self.sigma_BOLD = T(params.sigma_BOLD)
         
         self.aE, self.bE, self.dE = T(params.aE), T(params.bE), T(params.dE)
         self.aI, self.bI, self.dI = T(params.aI), T(params.bI), T(params.dI)
@@ -212,6 +201,8 @@ class WholeBrainFastDMF(nn.Module):
         }
         print("[Model] Params: " + ', '.join(f"{k}={v}" for k, v in {**param_dict, **model_args}.items()))
 
+        self.hidden_R_E, self.hidden_R_I, self.hidden_f = [], [], [] # for logging
+
     def generate_initial_states(self):
         """
         Generates the initial state for RWW (DMF) foward function. Uses same initial states as in the Griffiths et al. code
@@ -219,8 +210,8 @@ class WholeBrainFastDMF(nn.Module):
         Returns:
             initial_state: torch.Tensor of shape (node_size, state_size, batch_size)
         """
-        initial_state = 0.45 * np.random.uniform(0, 1, (self.node_size, self.state_size, self.batch_size))
-        baseline = np.array([0, 0, 0, 1.0, 1.0, 1.0]).reshape(1, self.state_size, 1)
+        initial_state = 0.45 * np.zeros((self.node_size, self.state_size, self.batch_size)) # np.random.uniform(0, 1, (self.node_size, self.state_size, self.batch_size))
+        baseline = np.array([0.001, 0.001, 0, 1.0, 1.0, 1.0]).reshape(1, self.state_size, 1)
         initial_state = initial_state + baseline
         state_means = initial_state.mean(axis=(0, 2))
         E_mean, I_mean, x_mean, f_mean, v_mean, q_mean = state_means
@@ -235,12 +226,6 @@ class WholeBrainFastDMF(nn.Module):
         the appropriate dimensions
         """
         x = a * current - b
-        with torch.no_grad():
-            bad_x = x[(torch.abs(1 - torch.exp(-self.dE * x)) < 1e-6) | (x < -178)]
-            if bad_x.numel() > 0:                
-                print('problematic x samples', bad_x[:10])
-                print('exp max', torch.exp(-self.dE * bad_x).max().item())
-
         return x / (1.000 - torch.exp(-d * x) + 1e-8)
     
     def forward(self, state: torch.Tensor, delays: torch.Tensor, noise_in: torch.Tensor, noise_out: torch.Tensor, sc: torch.Tensor):
@@ -283,31 +268,33 @@ class WholeBrainFastDMF(nn.Module):
             if params.inhibitory_gain_scalar:
                 inh_term = self.g_IE * I
             else:
-                row_sum = sc.sum(-1) # (B, N)
-                Ji  = 1.0 + 0.75 * self.g * row_sum        # (B, N)
+                row_sum = sc.sum(-1)                        # (B, N)
+                Ji  = 1.0 + self.fic_coeff * self.g * row_sum    # (B, N)
                 # Plotter.plot_vector(Ji[0, :].detach().cpu().numpy(), "Ji (batch = 0)")
                 inh_term = Ji.permute(1, 0).unsqueeze(1) * I        # (N, 1, B)
 
-            I_E = torch.relu(self.W_E * self.I_0 + self.g_EE * self.JN * E + self.g * self.JN * connectivity - inh_term)
-            I_I = torch.relu(self.W_I * self.I_0 + self.JN * E - I)
+            I_E = self.W_E * self.I_0 + self.g_EE * self.JN * E + self.g * self.JN * connectivity - inh_term
+            I_I = self.W_I * self.I_0 + self.JN * E - I
 
             R_E = self.firing_rate(self.aE, self.bE, self.dE, I_E)
             R_I = self.firing_rate(self.aI, self.bI, self.dI, I_I)
 
-            # if params.verbose and t % 10 == 0:
-            #     print(f"I_E [{I_E.min().item():8.3f} - {I_E.max().item():8.3f}]     {I_E.mean().item():8.3f}\n")
-            #     print(f"R_E [{R_E.min().item():8.3f} - {R_E.max().item():8.3f}]     {R_E.mean().item():8.3f}")
+            self.hidden_R_E.append(R_E.mean().item())
+            self.hidden_R_I.append(R_I.mean().item())
+
+            # if params.verbose and t % 100 == 0:
+            #     print(f"I_E [{I_E.min().item():8.3f} - {I_E.max().item():8.3f}]     {I_E.mean().item():8.3f}")
+            #     print(f"R_E [{R_E.min().item():8.3f} - {R_E.max().item():8.3f}]     {R_E.mean().item():8.3f}\n")
 
             dE = -E / self.tau_E + (1 - E) * self.gamma_E * R_E
             dI = -I / self.tau_I + self.gamma_I * R_I
 
-            E = torch.relu(E + self.dt * dE + self.sigma_E * E_noise * torch.sqrt(self.dt))
-            I = torch.relu(I + self.dt * dI + self.sigma_I * I_noise * torch.sqrt(self.dt))
+            E = torch.clamp(E + self.dt * dE + self.sigma_E * E_noise * torch.sqrt(self.dt), min=0.0, max=1.0)
+            I = torch.clamp(I + self.dt * dI + self.sigma_I * I_noise * torch.sqrt(self.dt), min=0.0, max=1.0)
 
             # Update delay buffer
             write_index = t % self.delays_max
             delays[:, write_index, :] = E.squeeze(1).detach()
-            # delays = torch.cat([E, delays[:, :-1, :]], dim=1)
 
             if (t % haemo_steps) == 0:
                 # Convert dt to seconds for haemodynamics
@@ -319,7 +306,7 @@ class WholeBrainFastDMF(nn.Module):
                 ) * self.itau_0_h
 
                 s = s + ds * self.dtt_s
-                f = f + df * self.dtt_s
+                f = f + df * self.dtt_s; self.hidden_f.append(f.mean().item())
                 v = v + dv * self.dtt_s
                 q = q + dq * self.dtt_s
 
@@ -331,8 +318,16 @@ class WholeBrainFastDMF(nn.Module):
                 if params.verbose:
                     step_idx = t // haemo_steps
                     if step_idx % 50 == 0:
-                        print(f"[{(t / 10):5.1f}ms]  E={E.mean():6.3f} I={I.mean():6.3f} I_E={I_E.mean():6.3f} I_I={I_I.mean():6.3f} R_E={R_E.mean():6.3f} R_I={R_I.mean():6.3f}", end="  |  ")
-                        print(f"s={s.mean():6.3f} f={f.mean():6.3f} v={v.mean():6.3f} q={q.mean():6.3f}") # [HAEMO {step_idx}/{params.hemo_steps_per_tr}] 
+                        with torch.no_grad():
+                            print(f"[{(t / 10):5.1f}ms]  E={E.mean():6.3f} I={I.mean():6.3f} I_E={I_E.mean():6.3f} I_I={I_I.mean():6.3f} R_E={R_E.mean():6.3f} R_I={R_I.mean():6.3f}", end="  |  ")
+                            print(f"s={s.mean():6.3f} f={f.mean():6.3f} v={v.mean():6.3f} q={q.mean():6.3f}") # [HAEMO {step_idx}/{params.hemo_steps_per_tr}] 
+
+                    # if step_idx % 200 == 0:
+                    #     with torch.no_grad():
+                    #         print('I_E mean', I_E.mean().item(), 'std', I_E.std().item())
+                    #         print('R_E mean', R_E.mean().item())
+                    #         print('E   mean', E.mean().item(), 'min', E.min().item(), 'max', E.max().item())
+
                         
             if params.verbose: # and (t == 0 or t == params.hidden_steps - 1):
                 if t == self.hidden_size - 1:    
@@ -345,7 +340,7 @@ class WholeBrainFastDMF(nn.Module):
             self.k2_h * (1 - q / v) + 
             self.k3_h * (1 - v)
         ).squeeze(1)
-        BOLD = BOLD + noise_out
+        BOLD = BOLD #+ self.sigma_BOLD * noise_out
 
         if params.verbose:
             print(f"[TR end] BOLD mean = {BOLD.mean():.3f}")

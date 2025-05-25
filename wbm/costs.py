@@ -67,9 +67,9 @@ class Costs:
             emp_batch = empirical_bold[:, :, b]
 
             # Zero mean
-            s_centered = sim_batch - torch.mean(sim_batch)
-            e_centered = emp_batch - torch.mean(emp_batch)
-            
+            s_centered = sim_batch - sim_batch.mean(dim=1, keepdim=True)
+            e_centered = emp_batch - emp_batch.mean(dim=1, keepdim=True)
+
             dot_product = (s_centered * e_centered).sum(dim=1)
             product = (s_centered.norm(dim=1) * e_centered.norm(dim=1) + 1e-8)
             rois_correlation.append((dot_product / product).mean().detach().item())
@@ -94,10 +94,11 @@ class Costs:
             # cov_sim = Costs.ledoit_wolf_shrinkage_torch(sim_b, shrinkage_value=0.1)  # (N, N)
             # cov_emp = Costs.ledoit_wolf_shrinkage_torch(emp_b, shrinkage_value=0.1)
             # Compute global FC matrices
-            sim_n = sim_b - torch.mean(sim_b, dim=1, keepdim=True)
-            emp_n = emp_b - torch.mean(emp_b, dim=1, keepdim=True)
-            cov_sim = sim_n @ sim_n.t()  # (N, N)
-            cov_emp = emp_n @ emp_n.t()  # (N, N)
+            sim_n = sim_b - torch.mean(sim_b, dim=0, keepdim=True)
+            emp_n = emp_b - torch.mean(emp_b, dim=0, keepdim=True)
+            cov_sim = sim_n.t() @ sim_n    # (N,N)
+            cov_emp = emp_n.t() @ emp_n
+
             std_sim = torch.sqrt(torch.diag(cov_sim) + 1e-8)
             std_emp = torch.sqrt(torch.diag(cov_emp) + 1e-8)
             FC_sim = cov_sim / (std_sim.unsqueeze(1) * std_sim.unsqueeze(0) + 1e-8)
@@ -112,36 +113,20 @@ class Costs:
             emp_vec = emp_vec - torch.mean(emp_vec)
 
             global_corr = torch.sum(sim_vec * emp_vec) / (torch.sqrt(torch.sum(sim_vec**2)) * torch.sqrt(torch.sum(emp_vec**2)) + 1e-8)
+            global_corrs.append(global_corr)
+            print(f"[Costs] Batch Item {b} Pearson's correlation: {global_corr:.4f}")
 
-
-            # dot = torch.sum(sim_vec * emp_vec)
-            # norm_sim = torch.sqrt(torch.sum(sim_vec ** 2)) #.clamp(min=1e-6)
-            # norm_emp = torch.sqrt(torch.sum(emp_vec ** 2)) #.clamp(min=1e-6)
-            # l2_product = norm_sim * norm_emp
-
-            # global_corr_b = dot / l2_product
-
-            # # Skip NaNs or Infs
-            # if not torch.isfinite(global_corr_b):
-            #     print(f"[WARNING] NaN or Inf in global_corr_b at batch {b}")
-            #     global_corr_b = torch.tensor(0.0, device=sim_vec.device, requires_grad=True)
-
-            # global_corrs.append(global_corr_b)
-
-        # global_corr = torch.mean(torch.stack(global_corrs)).clamp(min=1e-8)
-        # global_corr = torch.nan_to_num(global_corr, nan=0.0, posinf=0.0, neginf=0.0) # NAN -> 0
-        # global_corr = torch.clamp(global_corr, min=-0.999, max=0.999) # Clamp to (-1, 1)
-
-        correlation_loss = -torch.log(0.5 + 0.5 * global_corr + 1e-8)
+        average_fc_corr = torch.stack(global_corrs).mean()
+        correlation_loss = -torch.log(0.5 + 0.5 * average_fc_corr + 1e-8)
 
         print(f"RMSE between BOLD time series: {rmse:.4f}")
         print(f"Average per-ROI Pearson correlation: {average_rois_correlation:.4f}")
-        print(f"FC Pearson's correlation: {global_corr:.4f}")
+        print(f"FC Pearson's correlation: {average_fc_corr:.4f}")
 
         return {
             "loss": correlation_loss,
-            "rmse": rmse.detach().cpu().numpy(),
+            "rmse": rmse.detach().cpu().item(),
             "average_rois_correlation": average_rois_correlation,
-            "average_fc_correlation": global_corr.detach().cpu().numpy()
+            "average_fc_correlation": average_fc_corr.detach().cpu().item()
         }
         
